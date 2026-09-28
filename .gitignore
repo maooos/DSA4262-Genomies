@@ -1,0 +1,19 @@
+# Full datasets
+/data0/
+/data1/
+/data2/
+/data/raw/
+/data/processed/
+
+# Generated outputs
+/models/
+/outputs/
+
+# Python and notebooks
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Credentials
+.env
