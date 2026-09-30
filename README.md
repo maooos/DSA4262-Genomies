@@ -53,12 +53,12 @@ python -m scripts.parse_data \
 python -m scripts.parse_data \
   --signals data/raw/data1/dataset1.json.gz \
   --labels data/raw/data1/data.info \
-  --output data/raw/data/processed/data1_reads.parquet
+  --output data/processed/data1_reads.parquet
 
 python -m scripts.parse_data \
   --signals data/raw/data2/dataset2.json.gz \
   --labels data/raw/data2/data.info \
-  --output data/raw/data/processed/data2_reads.parquet
+  --output data/processed/data2_reads.parquet
 ```
 
 Each command creates a Parquet table and a corresponding `dataN_reads.audit.json` file containing parsing counts and label-matching information. The output directory is created automatically.
