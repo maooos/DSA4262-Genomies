@@ -7,8 +7,8 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SIGNAL_PATH = ROOT / "data0" / "dataset0.json.gz"
-LABEL_PATH = ROOT / "data0" / "data.info.labelled"
+SIGNAL_PATH = ROOT / "data/raw/data0/dataset0.json.gz"
+LABEL_PATH = ROOT / "data/raw/data0/data.info.labelled"
 
 # Read only the first site from the compressed file.
 with gzip.open(SIGNAL_PATH, "rt", encoding="utf-8") as handle:
