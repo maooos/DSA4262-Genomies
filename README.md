@@ -1,7 +1,5 @@
 # DSA4262-Genomies
 
-The repository currently contains data-parsing scripts and exploratory data analysis (EDA) for three datasets: data0, data1 and data2.
-
 ## Repository contents
 
 - `src/data_parser.py`: converts signal JSON files into per-read Parquet tables.
