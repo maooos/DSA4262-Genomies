@@ -11,9 +11,12 @@
 
 ## Setup
 
-Run from the repository root using Python 3.12:
+Using Python 3.12:
 
 ```bash
+git clone https://github.com/maooos/DSA4262_Genomies.git
+cd DSA4262_Genomies
+
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -65,7 +68,9 @@ Each command creates a Parquet table and a corresponding `dataN_reads.audit.json
 
 Each Parquet row represents one read observation at a transcript-position site, with nine signal features, sequence information, coverage and available annotations. Labels are joined using transcript ID and position.
 
-## Explore the data
+Existing output files are not overwritten. For a smaller trial/sample, add `--max-sites 100` and use a different output filename.
+
+## EDA
 
 The individual notebooks read from `data/processed/`. Set the notebook working directory to the repository root when executing them.
 
