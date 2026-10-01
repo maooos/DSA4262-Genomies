@@ -3,10 +3,14 @@ import pandas as pd
 import pytest
 
 from src.feature_engineering import (
+    CENTRAL_MOTIF_COLUMNS,
     FEATURE_COLUMNS,
+    FEATURE_COLUMNS_WITH_KMER_RESID,
+    KMER_RESID_AGG_COLUMNS,
     RAW_FEATURE_NAMES,
     SITE_KEY_COLUMNS,
     build_features,
+    fit_kmer_baselines,
 )
 
 
@@ -30,9 +34,10 @@ def synthetic_df():
     rng = np.random.default_rng(0)
     return pd.concat(
         [
-            _make_reads("T1", 10, "AAGACCA", n_reads=5, rng=rng),
-            _make_reads("T1", 25, "CGGACTT", n_reads=1, rng=rng),
-            _make_reads("T2", 7, "TGAACAC", n_reads=3, rng=rng),
+            _make_reads("T1", 10, "AAGACCA", n_reads=5, rng=rng),  # central AGACC (DRACH)
+            _make_reads("T1", 25, "CGGACTT", n_reads=1, rng=rng),  # central GGACT (DRACH)
+            _make_reads("T2", 7, "TGAACAC", n_reads=3, rng=rng),  # central GAACA (DRACH)
+            _make_reads("T2", 40, "ACCCCCA", n_reads=4, rng=rng),  # central CCCCC (not DRACH)
         ],
         ignore_index=True,
     )
@@ -41,7 +46,7 @@ def synthetic_df():
 def test_output_shape_and_keys(synthetic_df):
     X = build_features(synthetic_df)
 
-    assert len(X) == 3
+    assert len(X) == 4
     assert list(X.columns[: len(SITE_KEY_COLUMNS)]) == SITE_KEY_COLUMNS
     assert set(X.columns) == set(SITE_KEY_COLUMNS) | set(FEATURE_COLUMNS)
     assert not X.isna().any().any()
@@ -54,7 +59,7 @@ def test_label_and_gene_id_not_required(synthetic_df):
 
     assert "label" not in X.columns
     assert "gene_id" not in X.columns
-    assert len(X) == 3
+    assert len(X) == 4
 
 
 def test_single_read_site_has_zero_sd_not_nan(synthetic_df):
@@ -146,8 +151,90 @@ def test_empty_input_raises():
 def test_works_on_a_single_site_batch(synthetic_df):
     """build_features must also work on a one-site slice, since new/unseen
     data may be processed site-by-site or in arbitrary batches."""
-    one_site = synthetic_df[synthetic_df["transcript_id"] == "T2"]
+    one_site = synthetic_df[
+        (synthetic_df["transcript_id"] == "T2")
+        & (synthetic_df["transcript_position"] == 7)
+    ]
     X = build_features(one_site)
 
     assert len(X) == 1
     assert X.iloc[0]["transcript_id"] == "T2"
+
+
+def test_central_motif_one_hot(synthetic_df):
+    X = build_features(synthetic_df).set_index(SITE_KEY_COLUMNS)
+
+    # T1/10's 7-mer is AAGACCA -> central 5-mer AGACC, a DRACH motif.
+    row = X.loc[("T1", 10)]
+    assert row[CENTRAL_MOTIF_COLUMNS].sum() == 1
+    assert row["motif_AGACC"] == 1
+    assert row["motif_other"] == 0
+
+    # T2/40's 7-mer is ACCCCCA -> central 5-mer CCCCC, not a DRACH motif.
+    row = X.loc[("T2", 40)]
+    assert row[CENTRAL_MOTIF_COLUMNS].sum() == 1
+    assert row["motif_other"] == 1
+
+
+def test_kmer_baselines_add_opt_in_residual_columns(synthetic_df):
+    baselines = fit_kmer_baselines(synthetic_df)
+    X_default = build_features(synthetic_df)
+    X_with_resid = build_features(synthetic_df, kmer_baselines=baselines)
+
+    assert list(X_default.columns) == [*SITE_KEY_COLUMNS, *FEATURE_COLUMNS]
+    assert list(X_with_resid.columns) == [
+        *SITE_KEY_COLUMNS,
+        *FEATURE_COLUMNS_WITH_KMER_RESID,
+    ]
+    assert not X_with_resid.isna().any().any()
+
+    # T1/25 is the only site with a single read, and the only read sharing
+    # its motif (GGACT): the motif's median is that one read's own value,
+    # so its residual against the baseline is exactly 0.
+    for col in KMER_RESID_AGG_COLUMNS:
+        if col.endswith("_mean"):
+            assert X_with_resid.loc[
+                (X_with_resid["transcript_id"] == "T1")
+                & (X_with_resid["transcript_position"] == 25),
+                col,
+            ].item() == pytest.approx(0.0, abs=1e-8)
+
+
+def test_kmer_baseline_residuals_match_independent_computation(synthetic_df):
+    """Recompute the motif baseline and residual via a separate code path
+    (plain groupby, not fit_kmer_baselines/build_features) and compare, to
+    catch bugs in either function."""
+    baselines = fit_kmer_baselines(synthetic_df)
+    X = build_features(synthetic_df, kmer_baselines=baselines).set_index(
+        SITE_KEY_COLUMNS
+    )
+
+    central_5mer = synthetic_df["sequence"].str[1:6]
+    log_dwell_baseline_by_motif = (
+        np.log(synthetic_df["central_dwell"]).groupby(central_5mer).median()
+    )
+
+    site_rows = synthetic_df[
+        (synthetic_df["transcript_id"] == "T1")
+        & (synthetic_df["transcript_position"] == 10)
+    ]
+    site_motif = site_rows["sequence"].iloc[0][1:6]
+    expected_resid_mean = (
+        np.log(site_rows["central_dwell"]) - log_dwell_baseline_by_motif[site_motif]
+    ).mean()
+
+    assert X.loc[("T1", 10), "central_log_dwell_kmer_resid_mean"] == pytest.approx(
+        expected_resid_mean
+    )
+
+
+def test_kmer_baselines_fall_back_to_global_for_unseen_motif(synthetic_df):
+    baselines = fit_kmer_baselines(synthetic_df)
+    new_site = _make_reads(
+        "T3", 99, "TTTTTTT", n_reads=3, rng=np.random.default_rng(1)
+    )  # central TTTTT: not in the fitted baseline table or DRACH_MOTIFS
+
+    X = build_features(new_site, kmer_baselines=baselines)
+
+    assert not X.isna().any().any()
+    assert X.loc[0, "motif_other"] == 1

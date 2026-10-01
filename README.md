@@ -98,7 +98,7 @@ It requires `transcript_id`, `transcript_position`, `sequence`, `n_reads`
 and the nine raw signal columns; `gene_id` and `label` are ignored if
 present, so the same function runs on labelled training data and on
 label-free new data. Output is always the same shape and column set
-(`FEATURE_COLUMNS`, 134 columns) regardless of how many reads or sites go
+(`FEATURE_COLUMNS`, 153 columns) regardless of how many reads or sites go
 in, and never contains NaN.
 
 Per site, it builds:
@@ -114,6 +114,58 @@ Per site, it builds:
 - **Coverage**: `n_reads`.
 - **Sequence**: one-hot per position of the 7-mer (`seq_pos{0-6}_{A,C,G,T}`,
   28 columns).
+- **Central motif** (`motif_<5-mer>` / `motif_other`, 19 columns): one-hot
+  of the central 5-mer as a single DRACH-motif category. See
+  "Domain-motivated additions" below for why this is on top of the
+  position-by-position sequence one-hot above.
+
+### Domain-motivated additions
+
+Two further additions, each with its own justification and source,
+documented in detail in the corresponding docstring in
+`src/feature_engineering.py`:
+
+1. **Central motif one-hot** (`_one_hot_central_motif`, always on, in
+   `FEATURE_COLUMNS`). Our own EDA
+   (`notebooks/EDA_Findings.ipynb`, "Main findings") found the central
+   motif's positive rate alone ranges from 0.37% (AAACA) to 22.58%
+   (GGACT) in data0 — one of the strongest signals in the data. The
+   position-by-position sequence one-hot only exposes this to a model
+   indirectly (as a conjunction of 5 separate position columns); a direct
+   one-hot of the motif (18 DRACH motifs + "other") exposes it directly,
+   for a small, fixed extra cost.
+
+2. **k-mer-normalised central-signal residuals** (`fit_kmer_baselines` +
+   `build_features(df, kmer_baselines=...)`, opt-in, adds
+   `FEATURE_COLUMNS_WITH_KMER_RESID`). Nanopore current/dwell readings are
+   governed largely by which ~5-base k-mer is in the pore, regardless of
+   modification state. m6Anet's own feature set is explicitly built on
+   *normalised* signal intensity, sd and dwell time per k-mer, not raw
+   values — see Hendra et al. 2022, *Nature Methods*,
+   ["Detection of m6A from direct RNA sequencing using a multiple
+   instance learning framework"](https://www.nature.com/articles/s41592-022-01666-1)
+   (also on [bioRxiv](https://www.biorxiv.org/content/10.1101/2021.09.20.461055v1.full)).
+   Our 9 input features look like raw, non-normalised values (e.g.
+   signal means in the ~70–130 range), so a site's raw
+   `central_signal_mean` partly reflects "which motif is this" rather
+   than purely "is this modified"; the existing center-vs-flank
+   contrasts only correct for per-read scale, not for this per-motif
+   baseline.
+
+   **This one is opt-in, not in the default `FEATURE_COLUMNS`**, because
+   `fit_kmer_baselines` must be fit on a training fold only and then
+   reused (never re-fit) for validation/test/new data — fitting it
+   separately per split would leak each split's own signal distribution
+   into its own "baseline". Fit it once Person C's train/test split
+   exists:
+
+   ```python
+   from src.feature_engineering import build_features, fit_kmer_baselines
+
+   baselines = fit_kmer_baselines(train_df)       # fit on the training fold ONLY
+   X_train = build_features(train_df, kmer_baselines=baselines)
+   X_test = build_features(test_df, kmer_baselines=baselines)  # reuse, don't refit
+   ```
 
 Run the tests with:
 
