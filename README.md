@@ -78,3 +78,45 @@ The individual notebooks read from `data/processed/`. Set the notebook working d
 - `eda1.ipynb`: EDA for data1.
 - `eda2.ipynb`: EDA for data2.
 - `EDA_Findings.ipynb`: summary for feature engineering and modelling.
+
+## Feature engineering
+
+`src/feature_engineering.py` turns a per-read Parquet table (the output of
+`src/data_parser.py`) into one fixed-length feature row per
+`(transcript_id, transcript_position)` site:
+
+```python
+import pandas as pd
+from src.feature_engineering import build_features, FEATURE_COLUMNS
+
+df = pd.read_parquet("data/processed/data0_reads.parquet")
+X = build_features(df)          # one row per site, no label/gene_id
+X[FEATURE_COLUMNS]              # feature matrix only, keys dropped
+```
+
+It requires `transcript_id`, `transcript_position`, `sequence`, `n_reads`
+and the nine raw signal columns; `gene_id` and `label` are ignored if
+present, so the same function runs on labelled training data and on
+label-free new data. Output is always the same shape and column set
+(`FEATURE_COLUMNS`, 134 columns) regardless of how many reads or sites go
+in, and never contains NaN.
+
+Per site, it builds:
+
+- **Per-read features** (15, before aggregation): the three raw dwell
+  times log-transformed (`minus1_log_dwell`, `central_log_dwell`,
+  `plus1_log_dwell`), the six raw sd/mean signal features unchanged, and
+  six center-vs-flank contrasts (`{dwell,sd,mean}_contrast_{minus1,plus1}`
+  = central − flank).
+- **Site-level aggregates** (7 stats × 15 features = 105 columns): mean,
+  sd, median, p25, p75, min, max across all reads at the site. A
+  single-read site has its `_sd` columns set to 0, not NaN.
+- **Coverage**: `n_reads`.
+- **Sequence**: one-hot per position of the 7-mer (`seq_pos{0-6}_{A,C,G,T}`,
+  28 columns).
+
+Run the tests with:
+
+```bash
+python -m pytest tests/
+```
