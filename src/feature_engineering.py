@@ -1,24 +1,21 @@
-"""Turn a per-read table (see `src.data_parser`) into one fixed-length
-feature vector per transcript-position site.
+"""Turn a per-read table (see `src.data_parser`) into one feature vector
+per transcript-position site.
 
-Entry point: `build_features(df) -> X`. The same function is used for
-training data and for new/unseen data: it never looks at `label` or
-`gene_id`, so it has nothing to leak and nothing that forces those
-columns to be present.
+Main entry point: `build_features(df) -> X`. It works on both labelled
+training data and label-free new data, since it never reads `label` or
+`gene_id`.
 
-Two domain-motivated additions beyond the raw 9 signal features (see each
-function's docstring for the full justification and source):
+Two features are motivated by biology rather than general statistics:
 
-- `FEATURE_COLUMNS` always includes a one-hot of the central 5-mer DRACH
-  motif, not just a position-by-position 7-mer one-hot.
-- `fit_kmer_baselines` / `build_features(df, kmer_baselines=...)` add an
-  optional, opt-in central-position signal normalised against its motif's
-  typical level, following m6Anet's own feature design (Hendra et al.,
-  2022, Nat. Methods, https://www.nature.com/articles/s41592-022-01666-1).
-  This one is opt-in and not in the default FEATURE_COLUMNS because it
-  must be *fit* on a training fold only (see its docstring) before being
-  applied to validation/test/new data -- fit it once Person C's train/test
-  split exists, rather than inside this module.
+- `FEATURE_COLUMNS` includes a one-hot encoding of the central 5-mer as a
+  single DRACH motif, in addition to the position-wise 7-mer one-hot
+  (see `_one_hot_central_motif`).
+- `fit_kmer_baselines` and `build_features(df, kmer_baselines=...)` add an
+  optional k-mer-normalised central signal, following m6Anet's feature
+  design (Hendra et al., 2022, Nature Methods,
+  https://www.nature.com/articles/s41592-022-01666-1). This is opt-in:
+  fit `kmer_baselines` on the training split only, then reuse it
+  (without refitting) for validation, test, and new data.
 """
 
 import numpy as np
@@ -205,19 +202,14 @@ def _one_hot_sequence(sequence_by_site):
 
 def _one_hot_central_motif(central_5mer_by_site):
     """
-    One-hot of the central 5-mer as a single DRACH-motif category, rather
-    than only implicitly through the position-by-position 7-mer one-hot.
+    One-hot encoding of the central 5-mer as a single DRACH motif category
+    (18 DRACH motifs plus "other", 19 columns).
 
-    Justification: this project's own EDA (notebooks/EDA_Findings.ipynb,
-    "Main findings") found the central motif's positive rate ranges from
-    0.37% (AAACA) to 22.58% (GGACT) in data0 -- motif identity alone is
-    one of the strongest signals in the data. `_one_hot_sequence` encodes
-    each of the 7 positions independently, so recovering "this site's
-    central motif is GGACT" needs a tree model to split on 5 separate
-    position columns together. A direct one-hot of the motif gives that
-    same, already-known-to-be-informative signal in a single column pair,
-    at a small fixed cost (19 columns: the 18 DRACH motifs + "other" for
-    anything outside that set, matching data_parser.py's own motif check).
+    The central motif's identity alone is strongly associated with the
+    modification label (see notebooks/EDA_Findings.ipynb, "Main
+    findings"). This encodes that signal directly, rather than leaving a
+    model to recover it from a combination of the per-position columns in
+    `_one_hot_sequence`.
     """
     columns = {
         f"motif_{label}": (central_5mer_by_site == label).astype(np.int8)
@@ -231,45 +223,32 @@ def _one_hot_central_motif(central_5mer_by_site):
 
 def fit_kmer_baselines(df, features=KMER_BASELINE_FEATURE_NAMES):
     """
-    Learn each central motif's typical signal level, to later compute how
-    far a site's central-position signal deviates from what its motif alone
-    would predict.
+    Compute each central motif's typical signal level, used by
+    `build_features` to normalise the central-position signal against it.
 
-    Justification and source: nanopore current/dwell readings are governed
-    by which ~5-base k-mer is in the pore, largely independent of
-    modification state. m6Anet's own feature set is explicitly built on
-    *normalised* signal intensity, standard deviation and dwell time per
-    k-mer rather than raw values (Hendra et al., 2022, "Detection of m6A
-    from direct RNA sequencing using a multiple instance learning
-    framework", Nature Methods,
-    https://www.nature.com/articles/s41592-022-01666-1; see also the
-    bioRxiv preprint, https://www.biorxiv.org/content/10.1101/2021.09.20.461055v1.full).
-    Our 9 input features are per-read summaries that do not look
-    normalised (e.g. signal means in the ~70-130 range), so a site's raw
-    central_signal_mean partly reflects "which motif is this" rather than
-    purely "is this modified". `build_features`'s existing center-vs-flank
-    contrast features only correct for per-read scale, not for this
-    per-motif baseline.
+    Nanopore current and dwell readings depend heavily on which ~5-base
+    k-mer is in the pore, largely independent of modification state. For
+    this reason, m6Anet's own feature set uses signal intensity, standard
+    deviation and dwell time normalised per k-mer rather than raw values
+    (Hendra et al., 2022, "Detection of m6A from direct RNA sequencing
+    using a multiple instance learning framework", Nature Methods,
+    https://www.nature.com/articles/s41592-022-01666-1).
 
     Parameters
     ----------
     df : pandas.DataFrame
-        A per-read table (see `build_features`). Fit this ONLY on a
-        training fold/dataset, never on validation, test, or new data --
-        reuse the same returned table for those via
-        `build_features(df, kmer_baselines=...)`. Fitting separately per
-        split would let each split's own site signals leak into its own
-        "baseline", which defeats the point of a fixed external reference
-        and can inflate held-out performance.
+        A per-read table (see `build_features`), from the training split
+        only. Fit this table once on training data, then reuse it
+        (without refitting) for validation, test, and new data via
+        `build_features(df, kmer_baselines=...)`.
 
     Returns
     -------
     pandas.DataFrame
-        Indexed by central 5-mer motif (plus a "__global__" row used as
-        the fallback for a motif absent from this table, e.g. an "other"
-        motif or one not seen during fitting), with one column per
-        feature in `features`: the median value observed across all reads
-        with that central motif.
+        Indexed by central 5-mer motif, with one column per feature in
+        `features`: the median value across all reads with that central
+        motif. Includes a "__global__" row, used as the fallback for a
+        motif not present in this table.
     """
     missing = set(REQUIRED_COLUMNS) - set(df.columns)
 
@@ -321,26 +300,22 @@ def build_features(df, kmer_baselines=None):
         so the same function works on labelled training data and on
         label-free new data.
     kmer_baselines : pandas.DataFrame, optional
-        The table returned by `fit_kmer_baselines`, fit on a training
-        fold/dataset. When given, adds the k-mer-normalised central-signal
-        features described in `fit_kmer_baselines`'s docstring (columns
-        `KMER_RESID_AGG_COLUMNS`); the output then has
+        The table returned by `fit_kmer_baselines`, fit on the training
+        split. When given, adds the k-mer-normalised central-signal
+        features (columns `KMER_RESID_AGG_COLUMNS`), and the output has
         `FEATURE_COLUMNS_WITH_KMER_RESID` instead of `FEATURE_COLUMNS`.
-        Leave this as None until that table exists (fit on the training
-        side of Person C's CV split); do not fit it per call here.
 
     Returns
     -------
     pandas.DataFrame
-        One row per (transcript_id, transcript_position) site, in first-seen
-        order, with the two site-key columns followed by the feature
-        columns listed in FEATURE_COLUMNS, or FEATURE_COLUMNS_WITH_KMER_RESID
-        when `kmer_baselines` is given (fixed-length and identically named
-        regardless of input size, so the output can be reindexed /
-        concatenated across batches). Carries no label or gene_id: join
-        those back in separately for modelling or evaluation. Never
-        contains NaN: a site with a single read has its "_sd" columns set
-        to 0 rather than left undefined.
+        One row per (transcript_id, transcript_position) site, with the
+        site-key columns followed by the feature columns (`FEATURE_COLUMNS`,
+        or `FEATURE_COLUMNS_WITH_KMER_RESID` when `kmer_baselines` is
+        given). Columns are fixed and identically named regardless of
+        input size. Carries no label or gene_id: join those back
+        separately for modelling or evaluation. Never contains NaN: a
+        site with a single read has its "_sd" columns set to 0 rather
+        than left undefined.
     """
     _validate_input(df)
 
@@ -357,10 +332,6 @@ def build_features(df, kmer_baselines=None):
 
     grouped = read_level.groupby(SITE_KEY_COLUMNS, sort=False)[read_level_feature_names]
 
-    # Note: do not use groupby.describe() here. It is dramatically slower
-    # than agg()/quantile() on a wide group (minutes instead of seconds at
-    # dataset scale), because it does not go through the same vectorised
-    # Cython reduction path.
     simple_stats = grouped.agg(list(_SIMPLE_STAT_SUFFIXES))
     simple_stats.columns = [
         f"{feature}_{_SIMPLE_STAT_SUFFIXES[stat]}"

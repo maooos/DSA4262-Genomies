@@ -82,8 +82,8 @@ The individual notebooks read from `data/processed/`. Set the notebook working d
 ## Feature engineering
 
 `src/feature_engineering.py` turns a per-read Parquet table (the output of
-`src/data_parser.py`) into one fixed-length feature row per
-`(transcript_id, transcript_position)` site:
+`src/data_parser.py`) into one feature row per `(transcript_id,
+transcript_position)` site.
 
 ```python
 import pandas as pd
@@ -94,78 +94,63 @@ X = build_features(df)          # one row per site, no label/gene_id
 X[FEATURE_COLUMNS]              # feature matrix only, keys dropped
 ```
 
-It requires `transcript_id`, `transcript_position`, `sequence`, `n_reads`
-and the nine raw signal columns; `gene_id` and `label` are ignored if
-present, so the same function runs on labelled training data and on
-label-free new data. Output is always the same shape and column set
-(`FEATURE_COLUMNS`, 153 columns) regardless of how many reads or sites go
-in, and never contains NaN.
+Required input columns: `transcript_id`, `transcript_position`,
+`sequence`, `n_reads`, and the nine raw signal columns. `gene_id` and
+`label` are ignored if present, so the same function works on labelled
+training data and on label-free new data. The output always has the same
+columns (`FEATURE_COLUMNS`, 153 columns) and no missing values,
+regardless of how many reads or sites are in the input.
 
-Per site, it builds:
+### Features
 
-- **Per-read features** (15, before aggregation): the three raw dwell
-  times log-transformed (`minus1_log_dwell`, `central_log_dwell`,
-  `plus1_log_dwell`), the six raw sd/mean signal features unchanged, and
-  six center-vs-flank contrasts (`{dwell,sd,mean}_contrast_{minus1,plus1}`
-  = central − flank).
-- **Site-level aggregates** (7 stats × 15 features = 105 columns): mean,
-  sd, median, p25, p75, min, max across all reads at the site. A
-  single-read site has its `_sd` columns set to 0, not NaN.
+- **Dwell time**: log-transformed, since dwell times are strictly
+  positive and right-skewed.
+- **Center-flank contrasts**: for dwell, signal sd, and signal mean, the
+  central position's value minus each flank's value
+  (`{dwell,sd,mean}_contrast_{minus1,plus1}`).
+- **Site-level aggregation**: the 15 per-read features above are
+  summarised per site with mean, sd, median, p25, p75, min, and max (105
+  columns). A site with a single read has its `_sd` columns set to 0
+  rather than left undefined.
 - **Coverage**: `n_reads`.
-- **Sequence**: one-hot per position of the 7-mer (`seq_pos{0-6}_{A,C,G,T}`,
-  28 columns).
+- **Sequence**: one-hot encoding per position of the 7-mer
+  (`seq_pos{0-6}_{A,C,G,T}`, 28 columns).
 - **Central motif** (`motif_<5-mer>` / `motif_other`, 19 columns): one-hot
-  of the central 5-mer as a single DRACH-motif category. See
-  "Domain-motivated additions" below for why this is on top of the
-  position-by-position sequence one-hot above.
+  encoding of the central 5-mer as a single DRACH motif category. The
+  central motif's identity alone is strongly associated with the
+  modification label (see `notebooks/EDA_Findings.ipynb`, "Main
+  findings"); this makes that signal directly available, rather than
+  only recoverable from a combination of the position-wise one-hot
+  columns above.
 
-### Domain-motivated additions
+### Optional: k-mer-normalised signal
 
-Two further additions, each with its own justification and source,
-documented in detail in the corresponding docstring in
-`src/feature_engineering.py`:
+Nanopore current and dwell readings depend heavily on which k-mer is
+passing through the pore, largely independent of modification state. For
+this reason, m6Anet's own model uses signal intensity, standard
+deviation, and dwell time normalised per k-mer rather than raw values
+(Hendra et al., 2022, *Nature Methods*, ["Detection of m6A from direct
+RNA sequencing using a multiple instance learning
+framework"](https://www.nature.com/articles/s41592-022-01666-1)). Our
+nine raw features are not normalised this way, so `fit_kmer_baselines`
+computes each central motif's typical signal level, and
+`build_features(df, kmer_baselines=...)` uses it to add three residual
+features (`central_{log_dwell,signal_sd,signal_mean}_kmer_resid`),
+aggregated the same way as the other features (21 extra columns,
+`FEATURE_COLUMNS_WITH_KMER_RESID`).
 
-1. **Central motif one-hot** (`_one_hot_central_motif`, always on, in
-   `FEATURE_COLUMNS`). Our own EDA
-   (`notebooks/EDA_Findings.ipynb`, "Main findings") found the central
-   motif's positive rate alone ranges from 0.37% (AAACA) to 22.58%
-   (GGACT) in data0 — one of the strongest signals in the data. The
-   position-by-position sequence one-hot only exposes this to a model
-   indirectly (as a conjunction of 5 separate position columns); a direct
-   one-hot of the motif (18 DRACH motifs + "other") exposes it directly,
-   for a small, fixed extra cost.
+This is opt-in rather than always on: `fit_kmer_baselines` must be fit on
+the training split only, then reused — never refit — on validation,
+test, and new data, so that no split's baseline is computed from its own
+signal.
 
-2. **k-mer-normalised central-signal residuals** (`fit_kmer_baselines` +
-   `build_features(df, kmer_baselines=...)`, opt-in, adds
-   `FEATURE_COLUMNS_WITH_KMER_RESID`). Nanopore current/dwell readings are
-   governed largely by which ~5-base k-mer is in the pore, regardless of
-   modification state. m6Anet's own feature set is explicitly built on
-   *normalised* signal intensity, sd and dwell time per k-mer, not raw
-   values — see Hendra et al. 2022, *Nature Methods*,
-   ["Detection of m6A from direct RNA sequencing using a multiple
-   instance learning framework"](https://www.nature.com/articles/s41592-022-01666-1)
-   (also on [bioRxiv](https://www.biorxiv.org/content/10.1101/2021.09.20.461055v1.full)).
-   Our 9 input features look like raw, non-normalised values (e.g.
-   signal means in the ~70–130 range), so a site's raw
-   `central_signal_mean` partly reflects "which motif is this" rather
-   than purely "is this modified"; the existing center-vs-flank
-   contrasts only correct for per-read scale, not for this per-motif
-   baseline.
+```python
+from src.feature_engineering import build_features, fit_kmer_baselines
 
-   **This one is opt-in, not in the default `FEATURE_COLUMNS`**, because
-   `fit_kmer_baselines` must be fit on a training fold only and then
-   reused (never re-fit) for validation/test/new data — fitting it
-   separately per split would leak each split's own signal distribution
-   into its own "baseline". Fit it once Person C's train/test split
-   exists:
-
-   ```python
-   from src.feature_engineering import build_features, fit_kmer_baselines
-
-   baselines = fit_kmer_baselines(train_df)       # fit on the training fold ONLY
-   X_train = build_features(train_df, kmer_baselines=baselines)
-   X_test = build_features(test_df, kmer_baselines=baselines)  # reuse, don't refit
-   ```
+kmer_baselines = fit_kmer_baselines(train_df)
+X_train = build_features(train_df, kmer_baselines=kmer_baselines)
+X_test = build_features(test_df, kmer_baselines=kmer_baselines)
+```
 
 Run the tests with:
 
