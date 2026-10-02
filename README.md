@@ -78,3 +78,82 @@ The individual notebooks read from `data/processed/`. Set the notebook working d
 - `eda1.ipynb`: EDA for data1.
 - `eda2.ipynb`: EDA for data2.
 - `EDA_Findings.ipynb`: summary for feature engineering and modelling.
+
+## Feature engineering
+
+`src/feature_engineering.py` turns a per-read Parquet table (the output of
+`src/data_parser.py`) into one feature row per `(transcript_id,
+transcript_position)` site.
+
+```python
+import pandas as pd
+from src.feature_engineering import build_features, FEATURE_COLUMNS
+
+df = pd.read_parquet("data/processed/data0_reads.parquet")
+X = build_features(df)          # one row per site, no label/gene_id
+X[FEATURE_COLUMNS]              # feature matrix only, keys dropped
+```
+
+Required input columns: `transcript_id`, `transcript_position`,
+`sequence`, `n_reads`, and the nine raw signal columns. `gene_id` and
+`label` are ignored if present, so the same function works on labelled
+training data and on label-free new data. The output always has the same
+columns (`FEATURE_COLUMNS`, 153 columns) and no missing values,
+regardless of how many reads or sites are in the input.
+
+### Features
+
+- **Dwell time**: log-transformed, since dwell times are strictly
+  positive and right-skewed.
+- **Center-flank contrasts**: for dwell, signal sd, and signal mean, the
+  central position's value minus each flank's value
+  (`{dwell,sd,mean}_contrast_{minus1,plus1}`).
+- **Site-level aggregation**: the 15 per-read features above are
+  summarised per site with mean, sd, median, p25, p75, min, and max (105
+  columns). A site with a single read has its `_sd` columns set to 0
+  rather than left undefined.
+- **Coverage**: `n_reads`.
+- **Sequence**: one-hot encoding per position of the 7-mer
+  (`seq_pos{0-6}_{A,C,G,T}`, 28 columns).
+- **Central motif** (`motif_<5-mer>` / `motif_other`, 19 columns): one-hot
+  encoding of the central 5-mer as a single DRACH motif category. The
+  central motif's identity alone is strongly associated with the
+  modification label (see `notebooks/EDA_Findings.ipynb`, "Main
+  findings"); this makes that signal directly available, rather than
+  only recoverable from a combination of the position-wise one-hot
+  columns above.
+
+### Optional: k-mer-normalised signal
+
+Nanopore current and dwell readings depend heavily on which k-mer is
+passing through the pore, largely independent of modification state. For
+this reason, m6Anet's own model uses signal intensity, standard
+deviation, and dwell time normalised per k-mer rather than raw values
+(Hendra et al., 2022, *Nature Methods*, ["Detection of m6A from direct
+RNA sequencing using a multiple instance learning
+framework"](https://www.nature.com/articles/s41592-022-01666-1)). Our
+nine raw features are not normalised this way, so `fit_kmer_baselines`
+computes each central motif's typical signal level, and
+`build_features(df, kmer_baselines=...)` uses it to add three residual
+features (`central_{log_dwell,signal_sd,signal_mean}_kmer_resid`),
+aggregated the same way as the other features (21 extra columns,
+`FEATURE_COLUMNS_WITH_KMER_RESID`).
+
+This is opt-in rather than always on: `fit_kmer_baselines` must be fit on
+the training split only, then reused — never refit — on validation,
+test, and new data, so that no split's baseline is computed from its own
+signal.
+
+```python
+from src.feature_engineering import build_features, fit_kmer_baselines
+
+kmer_baselines = fit_kmer_baselines(train_df)
+X_train = build_features(train_df, kmer_baselines=kmer_baselines)
+X_test = build_features(test_df, kmer_baselines=kmer_baselines)
+```
+
+Run the tests with:
+
+```bash
+python -m pytest tests/
+```
