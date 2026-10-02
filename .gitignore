@@ -1,10 +1,5 @@
 # Full datasets
-/data/raw/
-/data/processed/
-
-# Generated outputs
-/models/
-/outputs/
+/data
 
 # Python and notebooks
 .venv/
